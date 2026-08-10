@@ -37,20 +37,20 @@ MODELS: dict[str, ModelConfig] = {
 
 @dataclass(frozen=True)
 class Settings:
-    # --- secrets ---
+    # secrets 
     api_key: str | None = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY"))
 
-    # --- default model ---
+    # default model
     default_model: str = os.getenv("DEFAULT_MODEL", "haiku")
 
-    # --- generation parameters ---
+    # generation parameters 
     max_tokens: int = int(os.getenv("MAX_TOKENS", "1024"))
 
-    # --- context logic ---
+    # context logic 
     full_mode_token_limit: int = int(os.getenv("FULL_MODE_TOKEN_LIMIT", "30000"))
     retrieval_char_budget: int = int(os.getenv("RETRIEVAL_CHAR_BUDGET", "48000"))
 
-    # --- document chunking ---
+    # document chunking 
     chunk_chars: int = int(os.getenv("CHUNK_CHARS", "2500"))
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "250"))
 
