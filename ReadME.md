@@ -1,143 +1,120 @@
-# Chat with Documents (mini-RAG)
+# ask-docs
 
-Ask questions about your documents (PDF / DOCX / TXT / MD) in plain language.
-The model answers **strictly from the document content** and cites which file the
-answer came from. If the answer isn't in the documents, it says so instead of
-making something up.
+Chat with your documents. Load one or more files (PDF, DOCX, TXT, MD) and ask
+questions in plain language. Answers are grounded strictly in the document text,
+and each answer shows the exact fragments it was built from. If the answer isn't
+in the documents, the app says so instead of guessing.
 
-Built with Python, Streamlit and the Claude API, with a custom BM25 retrieval
-layer so it scales to large or multiple documents without a vector database.
+Built with Python, Streamlit and the Claude API. Retrieval runs locally: a BM25
+ranker by default, with optional semantic and hybrid search via local embeddings.
 
----
+## Features
 
-##  Features
+Multiple documents at once, answered as a single set.
 
-- **Multiple documents at once** — questions are answered across the whole set.
-- **Smart context selection** — small documents are sent in full; large ones go
-  through a BM25 retriever that picks only the chunks relevant to the question.
-  This keeps requests cheap and within the model's context window.
-- **Source attribution** — every answer shows which file(s) it was built from.
-- **Grounded answers** — a strict system prompt prevents the model from inventing
-  facts that aren't in the documents.
-- **Streaming responses**, **chat export**, and a **per-request cost estimate**.
-- **Prompt caching** (`cache_control`) — follow-up questions on the same documents
-  are cheaper.
+Grounded answers with a strict prompt that stops the model from inventing facts.
 
----
+Exact citations: every answer lists the specific chunks used, not just filenames.
 
-##  Architecture
+Three retrieval modes: lexical (BM25), semantic (embeddings), and hybrid (both
+combined with Reciprocal Rank Fusion). BM25 needs no extra setup. Semantic and
+hybrid use a local multilingual model that works for Russian and Kazakh; if the
+embedding model can't load, the app falls back to BM25 automatically.
 
-```
-config.py       Single source of truth. Reads .env, defines models and parameters.
-extract.py      Text extraction from PDF / DOCX / TXT / MD.
-retrieval.py    Chunking + BM25 ranking (relevant-chunk selection).
-app.py          Streamlit UI + Claude API calls.
-.env            Your secrets (created from .env.example, never committed).
-.env.example    Settings template.
-.gitignore      Keeps .env and build artifacts out of git.
-```
+Small documents are sent to the model in full; larger ones are chunked and
+retrieved, which keeps requests inside the context window and cheaper.
 
-**Design principle:** secrets live only in `.env`; the code reads them through
-`config.py`. The API key is never hardcoded.
+Streaming responses, chat export, a per-request cost estimate, and prompt
+caching so follow-up questions on the same documents cost less.
 
-**Data flow:** `document → extract text → split into chunks → (BM25 select /
-send all) → build prompt → Claude API → grounded answer with sources`.
+## Project layout
 
----
+    config.py       Settings loaded from .env; models and parameters.
+    extract.py      Text extraction from PDF, DOCX, TXT, MD.
+    retrieval.py    Chunking and pluggable retrievers (BM25 / semantic / hybrid).
+    embeddings.py   Local sentence embeddings, used by semantic and hybrid modes.
+    app.py          Streamlit interface and Claude API calls.
+    tests/          Pytest suite.
 
-##  Getting Started
+Retrieval sits behind a small `Retriever` interface, so a new retriever can be
+added without touching the interface or the prompt code. The embedder is passed
+in, so `retrieval.py` never imports torch and stays quick to test.
 
-### 1. Install dependencies
+## Setup
 
-```bash
-pip install -r requirements.txt
-# If 'pip' is not found (common on Windows):
-python -m pip install -r requirements.txt
-```
+Install the core dependencies:
 
-### 2. Configure your API key
+    pip install -r requirements.txt
 
-Get a key at https://console.anthropic.com/ (API Keys section) and add credit
-to your account.
+If the `pip` command isn't found on Windows, use `python -m pip` instead.
 
-```bash
-# macOS / Linux
-cp .env.example .env
-# Windows
-copy .env.example .env
-```
+Get an API key from the Anthropic console and add credit to the account. Copy
+the settings template and add your key:
 
-Open `.env` and set your key:
+    copy .env.example .env      # Windows
+    cp .env.example .env        # macOS / Linux
 
-```
-ANTHROPIC_API_KEY=sk-ant-your_key_here
-```
+Open `.env` and set `ANTHROPIC_API_KEY`. The file stays on your machine and is
+ignored by git.
 
-`.env` stays on your machine and is excluded from git via `.gitignore`.
+Run the app:
 
-### 3. Run
+    streamlit run app.py
 
-```bash
-streamlit run app.py
-# or, if streamlit is not on PATH:
-python -m streamlit run app.py
-```
+It opens in the browser at http://localhost:8501.
 
-The app opens in your browser (usually http://localhost:8501).
+## Semantic and hybrid search (optional)
 
----
+These modes use local embeddings and need extra packages plus a fair amount of
+RAM. Install PyTorch matched to your hardware first:
 
-##  How It Works
+    pip install torch --index-url https://download.pytorch.org/whl/cu124   # NVIDIA GPU
+    pip install torch                                                      # CPU only
 
-- If all documents together are small (under ~30k tokens), the full text is sent
-  to the model.
-- For larger sets, a **BM25 retriever** ranks chunks by relevance to the question
-  and sends only the top ones — the same idea behind search engines, implemented
-  from scratch in `retrieval.py` with no external search dependency.
-- The selected context is placed in the system prompt and cached, so repeated
-  questions about the same documents cost less.
+Then the embedding library:
 
----
+    pip install -r requirements-embeddings.txt
 
-##  Configuration
+Set `RETRIEVAL_MODE` in `.env` to `bm25`, `semantic`, or `hybrid`. The first run
+downloads the embedding model once. On machines with limited memory, keep
+`RETRIEVAL_MODE=bm25` — the app runs the same, just without semantic search.
 
-All settings can be overridden in `.env`:
+## Configuration
 
-| Variable | Description | Default |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | API key (required) | — |
-| `DEFAULT_MODEL` | `haiku` or `sonnet` | `haiku` |
-| `MAX_TOKENS` | max answer length | `1024` |
-| `FULL_MODE_TOKEN_LIMIT` | threshold to send the full text | `30000` |
-| `RETRIEVAL_CHAR_BUDGET` | context budget when retrieving | `48000` |
-| `CHUNK_CHARS` / `CHUNK_OVERLAP` | chunk size and overlap | `2500` / `250` |
+All values live in `.env`:
 
----
+    ANTHROPIC_API_KEY        API key (required)
+    DEFAULT_MODEL            haiku or sonnet
+    MAX_TOKENS               max answer length
+    FULL_MODE_TOKEN_LIMIT    send full text below this size, retrieve above it
+    RETRIEVAL_CHAR_BUDGET    context budget when retrieving
+    CHUNK_CHARS              chunk size
+    CHUNK_OVERLAP            overlap between chunks
+    RETRIEVAL_MODE           bm25 | semantic | hybrid
+    EMBEDDING_MODEL          embedding model name
+    EMBEDDING_DEVICE         empty for auto, or cpu / cuda
 
-##  Tech Stack
+## Tests
 
-- **Python 3.12**
-- **Streamlit** — web UI
-- **Anthropic Claude API** — answer generation
-- **pypdf**, **python-docx** — document parsing
-- **python-dotenv** — environment configuration
-- Custom **BM25** retriever (no external vector DB)
+    pip install -r requirements-dev.txt
+    pytest
 
----
+The suite covers text extraction, chunking, BM25 ranking, semantic and hybrid
+retrieval, and configuration loading.
 
-##  Limitations & Roadmap
+## Tech stack
 
-- **Scanned / image PDFs** aren't read — OCR (`pytesseract` + `tesseract`) is a
-  planned addition.
-- **Lexical vs. semantic search** — BM25 matches on words. The next step is
-  embeddings + a vector store for semantic retrieval (matching by meaning, not
-  just wording). The architecture is ready for this: only the retriever in
-  `retrieval.py` needs to be swapped, the rest stays the same.
-- Other planned items: exact-sentence citations next to answers, and persisting
-  the index between runs.
+Python, Streamlit, Anthropic Claude API, pypdf and python-docx for parsing,
+sentence-transformers for optional local embeddings, and a BM25 ranker written
+from scratch.
 
----
+## Limitations
 
-##  License
+Scanned or image-only PDFs aren't read; that needs OCR.
 
-MIT — free to use, modify and learn from.
+BM25 matches on words, so it can miss questions phrased with different wording.
+Semantic and hybrid modes handle that, but need more memory to run locally.
+
+## License
+
+MIT. See LICENSE.

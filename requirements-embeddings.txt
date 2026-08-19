@@ -1,0 +1,12 @@
+# Optional: enables semantic / hybrid retrieval (Phase 2).
+#
+# IMPORTANT: install torch FIRST, separately, matched to your GPU/CUDA.
+# For an NVIDIA GPU (CUDA 12.4):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# For CPU only:
+#   pip install torch
+#
+# Then install this file:
+#   pip install -r requirements-embeddings.txt
+sentence-transformers>=3.0
+numpy>=1.26

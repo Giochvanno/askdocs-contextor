@@ -14,7 +14,9 @@ import anthropic
 
 from config import settings, MODELS
 from extract import extract_text, estimate_tokens
-from retrieval import chunk_document, BM25, select_context
+from retrieval import (
+    chunk_document, build_retriever, format_context, unique_sources, snippet,
+)
 
 
 # System prompt: force the model to answer strictly from the provided document text.
@@ -38,11 +40,11 @@ def get_client():
 client = get_client()
 
 
-# state
+# ---------- state ----------
 def init_state():
     st.session_state.setdefault("documents", {})   # {filename: text}
-    st.session_state.setdefault("chunks", [])
-    st.session_state.setdefault("bm25", None)
+    st.session_state.setdefault("retriever", None)
+    st.session_state.setdefault("chunk_count", 0)
     st.session_state.setdefault("full_mode", True)
     st.session_state.setdefault("messages", [])
 
@@ -51,20 +53,36 @@ init_state()
 
 
 def rebuild_index():
-    """Rebuild chunks and the BM25 index for the current set of documents."""
+    """Rebuild chunks and the retriever for the current set of documents."""
     chunks = []
     for name, text in st.session_state.documents.items():
         chunks += chunk_document(text, name)
-    st.session_state.chunks = chunks
 
     total_tokens = sum(estimate_tokens(t) for t in st.session_state.documents.values())
-    st.session_state.full_mode = total_tokens <= settings.full_mode_token_limit
-    st.session_state.bm25 = None if st.session_state.full_mode else BM25(chunks)
+    full_mode = total_tokens <= settings.full_mode_token_limit
+
+    embedder = None
+    if not full_mode and settings.retrieval_mode in ("semantic", "hybrid"):
+        try:
+            from embeddings import get_embedder
+            device = settings.embedding_device or None
+            with st.spinner("Загружаю модель эмбеддингов и индексирую… (первый раз дольше)"):
+                embedder = get_embedder(settings.embedding_model, device)
+        except Exception as e:  # noqa: BLE001 — fall back to lexical search
+            st.warning(f"Семантический поиск недоступен ({e}). Использую BM25.")
+            embedder = None
+
+    st.session_state.retriever = build_retriever(
+        chunks, full_mode, settings.retrieval_mode, embedder
+    )
+    st.session_state.chunk_count = len(chunks)
+    st.session_state.full_mode = full_mode
+    st.session_state.active_retriever = type(st.session_state.retriever).__name__
 
 
-# sidebar 
+# ---------- sidebar ----------
 with st.sidebar:
-    st.header(" Настройки")
+    st.header("⚙️ Настройки")
 
     model_labels = {cfg.label: key for key, cfg in MODELS.items()}
     default_label = MODELS[settings.default_model].label
@@ -106,17 +124,23 @@ with st.sidebar:
     if st.session_state.documents:
         st.divider()
         total_tokens = sum(estimate_tokens(t) for t in st.session_state.documents.values())
-        st.caption(f" Документов: {len(st.session_state.documents)}")
-        st.caption(f"~{total_tokens:,} токенов · чанков: {len(st.session_state.chunks)}")
-        mode = "весь текст в контексте" if st.session_state.full_mode else "поиск релевантных кусков (BM25)"
-        st.caption(f"Режим: {mode}")
+        st.caption(f"📚 Документов: {len(st.session_state.documents)}")
+        st.caption(f"~{total_tokens:,} токенов · чанков: {st.session_state.chunk_count}")
+        retriever_names = {
+            "FullContextRetriever": "весь текст в контексте",
+            "BM25Retriever": "лексический поиск (BM25)",
+            "EmbeddingsRetriever": "семантический поиск (эмбеддинги)",
+            "HybridRetriever": "гибридный поиск (BM25 + эмбеддинги)",
+        }
+        active = st.session_state.get("active_retriever", "")
+        st.caption(f"Поиск: {retriever_names.get(active, active)}")
 
         if st.session_state.messages:
             transcript = "\n\n".join(
                 f"**{m['role']}:** {m['content']}" for m in st.session_state.messages
             )
             st.download_button(
-                "⬇ Экспорт диалога", data=transcript,
+                "⬇️ Экспорт диалога", data=transcript,
                 file_name=f"chat_{datetime.date.today()}.md", mime="text/markdown",
             )
         if st.button("🗑 Очистить диалог"):
@@ -124,7 +148,7 @@ with st.sidebar:
             st.rerun()
 
 
-# main screen 
+# ---------- main screen ----------
 st.title("📄 Чат с документами")
 
 if client is None:
@@ -135,23 +159,32 @@ if client is None:
     st.stop()
 
 if not st.session_state.documents:
-    st.info(" Загрузите один или несколько документов в панели слева, чтобы начать.")
+    st.info("👈 Загрузите один или несколько документов в панели слева, чтобы начать.")
     st.stop()
+
+
+def render_citations(picked: list[dict]):
+    """Show an expandable block with the exact chunks used for the answer."""
+    if not picked:
+        return
+    with st.expander(f"📎 Источники ({len(picked)} фрагм.)"):
+        for c in picked:
+            st.markdown(f"**{c['doc']}**")
+            st.caption(snippet(c["text"]))
+
 
 # render message history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        if msg.get("sources"):
-            st.caption("📎 Источники: " + ", ".join(msg["sources"]))
+        if msg.get("citations"):
+            render_citations(msg["citations"])
 
 
 def build_system(question: str):
-    """Build the system prompt: instructions + selected document context (cached)."""
-    context, sources = select_context(
-        st.session_state.chunks, st.session_state.bm25,
-        question, settings.retrieval_char_budget,
-    )
+    """Build the system prompt: instructions + retrieved context (cached)."""
+    picked = st.session_state.retriever.select(question, settings.retrieval_char_budget)
+    context = format_context(picked)
     system = [
         {"type": "text", "text": INSTRUCTIONS},
         {
@@ -160,7 +193,7 @@ def build_system(question: str):
             "cache_control": {"type": "ephemeral"},  # cache the context -> cheaper follow-up questions
         },
     ]
-    return system, sources, context
+    return system, picked, context
 
 
 # user input
@@ -171,8 +204,8 @@ if prompt := st.chat_input("Спросите что-нибудь по докум
 
     with st.chat_message("assistant"):
         try:
-            system, sources, context = build_system(prompt)
-            # API history without our internal "sources" field
+            system, picked, context = build_system(prompt)
+            # API history without our internal fields (citations)
             api_messages = [
                 {"role": m["role"], "content": m["content"]} for m in st.session_state.messages
             ]
@@ -188,8 +221,7 @@ if prompt := st.chat_input("Спросите что-нибудь по докум
                         yield chunk
 
             answer = st.write_stream(stream_text)
-            if sources:
-                st.caption("📎 Источники: " + ", ".join(sources))
+            render_citations(picked)
 
             # rough cost estimate for this request
             in_tok = estimate_tokens(context) + estimate_tokens(prompt) + 200
@@ -198,7 +230,8 @@ if prompt := st.chat_input("Спросите что-нибудь по докум
             st.caption(f"≈ {in_tok:,} вх. / {out_tok:,} исх. токенов · ~${cost:.4f}")
 
             st.session_state.messages.append(
-                {"role": "assistant", "content": answer, "sources": sources}
+                {"role": "assistant", "content": answer,
+                 "sources": unique_sources(picked), "citations": picked}
             )
         except anthropic.APIError as e:
             st.error(f"Ошибка API: {e}")
